@@ -1,3 +1,4 @@
+
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 
@@ -35,12 +36,9 @@ const images = import.meta.glob('./images/*.webp', {
 }) as Record<string, string>
 
 const lessons = ref<Lesson[]>([])
-
 const searchQuery = ref('')
 const matchingLessonIds = ref<number[] | null>(null)
 const searchError = ref('')
-
-
 const lessonError = ref('')
 
 async function loadLessons() {
@@ -77,6 +75,7 @@ async function searchLessons() {
 
   if (!query) {
     matchingLessonIds.value = null
+    searchError.value = ''
     return
   }
 
@@ -95,16 +94,22 @@ async function searchLessons() {
     searchError.value = ''
   } catch (error) {
     searchError.value = 'Search failed. Please try again.'
-    console.error(error)
+    console.error('Search failed:', error)
   }
 }
 
-
+function clearSearch() {
+  searchQuery.value = ''
+  matchingLessonIds.value = null
+  searchError.value = ''
+}
 
 const sortOption = ref('subject-asc')
 const cart = ref<CartItem[]>([])
 const showCart = ref(false)
 const checkoutMessage = ref('')
+const checkoutError = ref('')
+const isSubmitting = ref(false)
 const customerName = ref('')
 const customerPhone = ref('')
 
@@ -133,13 +138,11 @@ const sortedLessons = computed(() => {
     return direction === 'desc' ? -result : result
   })
 
+  const matchingIds = matchingLessonIds.value
 
-const matchingIds = matchingLessonIds.value
-
-return matchingIds === null
-  ? sorted
-  : sorted.filter(lesson => matchingIds.includes(lesson.id))
-
+  return matchingIds === null
+    ? sorted
+    : sorted.filter(lesson => matchingIds.includes(lesson.id))
 })
 
 const cartCount = computed(() =>
@@ -166,11 +169,14 @@ const validPhone = computed(() =>
 )
 
 const canCheckout = computed(() =>
-  cartCount.value > 0 && validName.value && validPhone.value
+  cartCount.value > 0 &&
+  validName.value &&
+  validPhone.value &&
+  !isSubmitting.value
 )
 
 function addToCart(lesson: Lesson) {
-  if (lesson.spaces <= 0) return
+  if (lesson.spaces <= 0 || isSubmitting.value) return
 
   const existingItem = cart.value.find(
     item => item.lessonId === lesson.id
@@ -188,9 +194,12 @@ function addToCart(lesson: Lesson) {
 
   lesson.spaces--
   checkoutMessage.value = ''
+  checkoutError.value = ''
 }
 
 function removeFromCart(lessonId: number) {
+  if (isSubmitting.value) return
+
   const index = cart.value.findIndex(
     item => item.lessonId === lessonId
   )
@@ -210,6 +219,8 @@ function removeFromCart(lessonId: number) {
 }
 
 function emptyCart() {
+  if (isSubmitting.value) return
+
   cart.value.forEach(item => {
     item.lesson.spaces += item.quantity
   })
@@ -218,36 +229,109 @@ function emptyCart() {
   showCart.value = false
 }
 
-function checkout() {
-  if (!canCheckout.value) return
 
-  const total = cartTotal.value
-  const count = cartCount.value
+async function checkout() {
+  if (!canCheckout.value || isSubmitting.value) return
 
-  cart.value = []
-  showCart.value = false
+  isSubmitting.value = true
+  checkoutMessage.value = ''
+  checkoutError.value = ''
 
-  checkoutMessage.value =
-    `Demo order confirmed for ${customerName.value.trim()}. ` +
-    `${count} lesson(s), total £${total.toFixed(2)}. ` +
-    `No order has been sent to the server yet.`
+  const purchasedItems = cart.value.map(item => ({
+    lessonId: item.lessonId,
+    quantity: item.quantity,
+    remainingSpaces: item.lesson.spaces
+  }))
 
-  customerName.value = ''
-  customerPhone.value = ''
+  try {
+    const response = await fetch('/orders', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        name: customerName.value.trim(),
+        phone: customerPhone.value.trim(),
+        items: purchasedItems.map(item => ({
+          lessonId: item.lessonId,
+          quantity: item.quantity
+        }))
+      })
+    })
+
+    if (!response.ok) {
+      throw new Error(`Order HTTP ${response.status}`)
+    }
+
+    const count = cartCount.value
+    const total = cartTotal.value
+
+    cart.value = []
+    showCart.value = false
+    customerName.value = ''
+    customerPhone.value = ''
+
+    checkoutMessage.value =
+      `Order saved successfully! ${count} lesson(s), £${total.toFixed(2)}.`
+
+    const updates = await Promise.allSettled(
+      purchasedItems.map(async item => {
+        const updateResponse = await fetch(
+          `/lessons/${item.lessonId}`,
+          {
+            method: 'PUT',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              space: item.remainingSpaces
+            })
+          }
+        )
+
+        if (!updateResponse.ok) {
+          throw new Error(`PUT HTTP ${updateResponse.status}`)
+        }
+      })
+    )
+
+    if (updates.some(result => result.status === 'rejected')) {
+      checkoutError.value =
+        'Order saved, but some spaces were not updated. Do not submit again.'
+    } else {
+      checkoutMessage.value =
+        `Order confirmed! ${count} lesson(s), £${total.toFixed(2)}.`
+    }
+
+    await loadLessons()
+  } catch (error) {
+    checkoutError.value = 'Order submission failed. Please check the server.'
+    console.error('Checkout failed:', error)
+  } finally {
+    isSubmitting.value = false
+  }
 }
-</script>
 
-<style src="./styles/style.css"></style>
+</script>
 
 <template>
   <div class="page">
-  <p v-if="lessonError" class="error-message">
-    {{  lessonError }}
-  </p>
+    <p
+      v-if="lessonError"
+      class="error-message"
+      role="alert"
+    >
+      {{ lessonError }}
+    </p>
+
     <header class="header">
       <div>
-        <p class="eyebrow">LEARN • CREATE • GROW</p>
+        <p class="eyebrow">
+          LEARN • CREATE • GROW
+        </p>
+
         <h1>After School Lessons</h1>
+
         <p class="subtitle">
           Explore exciting after-school activities and
           discover something new.
@@ -256,7 +340,7 @@ function checkout() {
 
       <button
         class="view-cart-button"
-        :disabled="cartCount === 0 && !showCart"
+        :disabled="(cartCount === 0 && !showCart) || isSubmitting"
         @click="showCart = !showCart"
       >
         🛒 {{ showCart ? 'View Lessons' : 'View Cart' }}
@@ -273,6 +357,14 @@ function checkout() {
         {{ checkoutMessage }}
       </p>
 
+      <p
+        v-if="checkoutError"
+        class="error-message"
+        role="alert"
+      >
+        {{ checkoutError }}
+      </p>
+
       <section v-if="showCart" class="cart-panel">
         <div class="cart-heading">
           <div>
@@ -282,6 +374,7 @@ function checkout() {
 
           <button
             class="secondary-button"
+            :disabled="isSubmitting"
             @click="showCart = false"
           >
             Continue Shopping
@@ -300,13 +393,18 @@ function checkout() {
             class="cart-image"
           />
 
-          <div v-else class="cart-image placeholder">
+          <div
+            v-else
+            class="cart-image placeholder"
+          >
             {{ item.lesson.icon }}
           </div>
 
           <div class="cart-item-info">
             <h3>{{ item.lesson.subject }}</h3>
+
             <p>{{ item.lesson.location }}</p>
+
             <p>
               £{{ item.lesson.price.toFixed(2) }}
               × {{ item.quantity }}
@@ -320,6 +418,7 @@ function checkout() {
 
             <button
               class="delete-button"
+              :disabled="isSubmitting"
               @click="removeFromCart(item.lessonId)"
             >
               Remove
@@ -329,7 +428,9 @@ function checkout() {
 
         <div class="cart-total">
           <span>Total</span>
-          <strong>£{{ cartTotal.toFixed(2) }}</strong>
+          <strong>
+            £{{ cartTotal.toFixed(2) }}
+          </strong>
         </div>
 
         <div class="checkout-form">
@@ -345,6 +446,7 @@ function checkout() {
             type="text"
             placeholder="Enter your full name"
             autocomplete="name"
+            :disabled="isSubmitting"
           />
 
           <p
@@ -364,6 +466,7 @@ function checkout() {
             type="tel"
             placeholder="Enter your phone number"
             autocomplete="tel"
+            :disabled="isSubmitting"
           />
 
           <p
@@ -376,6 +479,7 @@ function checkout() {
           <div class="cart-actions">
             <button
               class="empty-button"
+              :disabled="isSubmitting"
               @click="emptyCart"
             >
               Empty Cart
@@ -383,10 +487,14 @@ function checkout() {
 
             <button
               class="checkout-button"
-              :disabled="!canCheckout"
+              :disabled="!canCheckout || isSubmitting"
               @click="checkout"
             >
-              Checkout · £{{ cartTotal.toFixed(2) }}
+              {{
+                isSubmitting
+                  ? 'Submitting...'
+                  : `Checkout · £${cartTotal.toFixed(2)}`
+              }}
             </button>
           </div>
         </div>
@@ -394,26 +502,28 @@ function checkout() {
 
       <template v-else>
         <section class="toolbar">
+          <div class="lesson-search">
+            <input
+              v-model="searchQuery"
+              type="search"
+              placeholder="Search lessons, locations, prices..."
+              @keyup.enter="searchLessons"
+            />
 
-<div class="lesson-search">
-  <input
-    v-model="searchQuery"
-    type="search"
-    placeholder="Search lessons, locations, prices..."
-    @keyup.enter="searchLessons"
-  />
+            <button
+              type="button"
+              @click="searchLessons"
+            >
+              Search
+            </button>
 
-  <button type="button" @click="searchLessons">
-    Search
-  </button>
-
-  <button
-    type="button"
-    @click="searchQuery = ''; matchingLessonIds = null"
-  >
-    Clear
-  </button>
-</div>
+            <button
+              type="button"
+              @click="clearSearch"
+            >
+              Clear
+            </button>
+          </div>
 
           <div>
             <h2>Available Lessons</h2>
@@ -422,34 +532,60 @@ function checkout() {
 
           <label for="sort">
             Sort by:
-            <select id="sort" v-model="sortOption">
+
+            <select
+              id="sort"
+              v-model="sortOption"
+            >
               <option value="subject-asc">
                 Subject (A–Z)
               </option>
+
               <option value="subject-desc">
                 Subject (Z–A)
               </option>
+
               <option value="location-asc">
                 Location (A–Z)
               </option>
+
               <option value="location-desc">
                 Location (Z–A)
               </option>
+
               <option value="price-asc">
                 Price (Low to High)
               </option>
+
               <option value="price-desc">
                 Price (High to Low)
               </option>
+
               <option value="spaces-asc">
                 Spaces (Low to High)
               </option>
+
               <option value="spaces-desc">
                 Spaces (High to Low)
               </option>
             </select>
           </label>
         </section>
+
+        <p
+          v-if="searchError"
+          class="error-message"
+          role="alert"
+        >
+          {{ searchError }}
+        </p>
+
+        <p
+          v-if="matchingLessonIds !== null && sortedLessons.length === 0"
+          class="error-message"
+        >
+          No lessons found for your search.
+        </p>
 
         <section class="lesson-grid">
           <article
@@ -464,7 +600,10 @@ function checkout() {
               class="lesson-image"
             />
 
-            <div v-else class="lesson-image placeholder">
+            <div
+              v-else
+              class="lesson-image placeholder"
+            >
               {{ lesson.icon }}
             </div>
 
@@ -489,10 +628,14 @@ function checkout() {
 
             <button
               class="add-button"
-              :disabled="lesson.spaces === 0"
+              :disabled="lesson.spaces === 0 || isSubmitting"
               @click="addToCart(lesson)"
             >
-              {{ lesson.spaces > 0 ? 'Add to Cart' : 'Sold Out' }}
+              {{
+                lesson.spaces > 0
+                  ? 'Add to Cart'
+                  : 'Sold Out'
+              }}
             </button>
           </article>
         </section>
@@ -505,3 +648,4 @@ function checkout() {
   </div>
 </template>
 
+<style src="./styles/style.css"></style>
